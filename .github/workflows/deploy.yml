@@ -1,0 +1,108 @@
+name: Deploy Telegram Uploader
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "scripts/**"
+      - "tests/**"
+      - "Dockerfile"
+      - "docker-compose.prod.yml"
+      - "requirements.txt"
+      - "requirements-dev.txt"
+      - "pytest.ini"
+      - ".dockerignore"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-telegram-uploader
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install test dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Compile Python sources
+        run: python -m compileall -q app tests
+
+      - name: Run tests
+        run: python -m pytest -q
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build production image
+        run: docker build --pull --tag telegram-uploader:latest .
+
+      - name: Save production image
+        run: |
+          docker save telegram-uploader:latest -o telegram-uploader.tar
+          chmod 644 telegram-uploader.tar
+          ls -lh telegram-uploader.tar
+
+      - name: Copy image and Compose file to Oracle
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ vars.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: "telegram-uploader.tar,docker-compose.prod.yml"
+          target: "~/telegram-uploader"
+          overwrite: true
+
+      - name: Deploy on Oracle
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ vars.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -eu
+            cd ~/telegram-uploader
+
+            docker load -i telegram-uploader.tar
+            docker compose -f docker-compose.prod.yml up -d --force-recreate --remove-orphans
+            rm -f telegram-uploader.tar
+            docker image prune -f
+
+            for attempt in $(seq 1 18); do
+              status=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' telegram-uploader 2>/dev/null || true)
+              if [ "$status" = "healthy" ]; then
+                docker compose -f docker-compose.prod.yml ps
+                exit 0
+              fi
+              if [ "$status" = "unhealthy" ] || [ "$status" = "exited" ] || [ "$status" = "dead" ]; then
+                break
+              fi
+              sleep 5
+            done
+
+            docker compose -f docker-compose.prod.yml ps
+            docker compose -f docker-compose.prod.yml logs --tail=100 telegram-uploader
+            exit 1

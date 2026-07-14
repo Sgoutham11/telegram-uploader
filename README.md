@@ -1,2 +1,166 @@
-# telegram-uploader
-This service will upload telegram file from telegram to any rclone supporting cloud drive.
+# Telegram Cloud Uploader
+
+A production-oriented, Dockerized Python 3.12 service that uses a normal Telegram account through Telethon/MTProto. Forward any Telegram media into Saved Messages or one configured private chat; the service streams it to disk and transfers it to any rclone-supported cloud. Albums are handled consistently as one independent job per Telegram message while preserving `media_group_id` in state.
+
+## Architecture
+
+`Telethon event handler -> bounded asyncio queue -> download worker -> rclone copyto -> remote verification`. Each message has an atomic JSON state file in `/data/state`; downloads use isolated `/data/downloads/{chat_id}_{message_id}` directories. The current upload directory is atomically persisted in `/data/state/current_directory.json`. No database or public port is used.
+
+## Prerequisites
+
+- Docker Engine with Compose v2
+- A Telegram API ID/hash from [my.telegram.org](https://my.telegram.org)
+- An rclone remote
+- Enough local space for the largest file plus `MIN_FREE_DISK_GB`
+
+## Configure
+
+```bash
+cp .env.example .env
+mkdir -p data/downloads data/state data/session data/logs config/rclone
+```
+
+PowerShell:
+
+```powershell
+Copy-Item .env.example .env
+New-Item -ItemType Directory -Force data/downloads,data/state,data/session,data/logs,config/rclone
+```
+
+Put the API credentials from my.telegram.org in `.env`. For Saved Messages use `WATCH_MODE=saved_messages`. For a group/channel use `WATCH_MODE=chat` and its numeric `WATCH_CHAT_ID` (commonly `-100...`). IDs can be found by temporarily enabling Telethon debug logs or using a trusted ID-info tool; never give an untrusted bot sensitive forwarded content. Set `ALLOWED_USER_IDS`; when empty, only the logged-in account is accepted.
+
+## Configure rclone
+
+Configure outside the service (Google Drive: choose `drive`, complete OAuth, select the appropriate scope):
+
+```bash
+docker run --rm -it -v "$(pwd)/config/rclone:/config/rclone" rclone/rclone config --config /config/rclone/rclone.conf
+```
+
+PowerShell:
+
+```powershell
+docker run --rm -it -v "${PWD}/config/rclone:/config/rclone" rclone/rclone config --config /config/rclone/rclone.conf
+```
+
+The remote name must match `RCLONE_REMOTE`. Google Drive, OneDrive, Dropbox, S3, B2, WebDAV, and other rclone backends work without provider-specific application code.
+
+## Local development
+
+The default [docker-compose.yml](docker-compose.yml) builds the current checkout and is intended for local development:
+
+```bash
+cp .env.example .env
+docker compose run --rm telegram-uploader python -m app.auth
+docker compose up --build
+docker compose logs -f telegram-uploader
+```
+
+Authentication requests the Telegram code and, if enabled, the 2FA password. Normal startup is non-interactive and fails with instructions if `/data/session/telegram.session` is absent. On bind-mounted Linux folders, ensure UID 10001 can write to `data/`.
+
+## Production deployment with GitHub Actions
+
+Production uses [docker-compose.prod.yml](docker-compose.prod.yml). Commits to `main` that change application or deployment files run the tests, build `telegram-uploader:latest` on the GitHub runner, copy the saved image and production Compose file to Oracle, and recreate the service over SSH. The workflow can also be started manually from the GitHub Actions page.
+
+Prepare the Oracle server once:
+
+```bash
+mkdir -p ~/telegram-uploader/{data/downloads,data/state,data/session,data/logs,config/rclone}
+cd ~/telegram-uploader
+# Create the private runtime files once. GitHub Actions does not replace them:
+cp .env.example .env
+# Authenticate once so data/session/telegram.session exists.
+# Configure rclone so config/rclone/rclone.conf exists.
+```
+
+The server only needs the production Compose file and these persistent private assets:
+
+- `.env`
+- `data/session/telegram.session`
+- `config/rclone/rclone.conf`
+- the mounted `data/` directories for downloads, state, and logs
+
+Configure these GitHub repository settings under **Settings -> Secrets and variables -> Actions**:
+
+- Secret `SERVER_HOST`: Oracle hostname or IP address
+- Secret `SSH_PRIVATE_KEY`: private key text used to connect to Oracle
+- Variable `SERVER_USER`: Oracle SSH user, such as `ubuntu`
+
+The workflow deploys only inside `~/telegram-uploader`. It replaces `telegram-uploader.tar` and `docker-compose.prod.yml`, loads the image, recreates the container, waits for it to become healthy, and removes the transferred archive. The server's `.env`, Telegram session, rclone configuration, downloads, state, and logs remain in their existing bind-mounted paths. Restrict the deploy key to this server and repository workflow.
+
+For a manual production update when troubleshooting:
+
+```bash
+cd ~/telegram-uploader
+# Copy telegram-uploader.tar and docker-compose.prod.yml into this directory first.
+docker load -i telegram-uploader.tar
+docker compose -f docker-compose.prod.yml up -d --force-recreate --remove-orphans
+```
+
+## Persistent upload directory
+
+With `RCLONE_BASE_PATH=UPLOADS` and `DEFAULT_UPLOAD_DIRECTORY=DOWNLOADS`, forwarding a file uses:
+
+```text
+Forward file
+→ UPLOADS/DOWNLOADS/file.mkv
+```
+
+Select a directory for subsequently forwarded files:
+
+```text
+.dir goutham
+Forward file
+→ UPLOADS/goutham/file.mkv
+```
+
+Use `.dir` to show the current directory and `.dir default` or `.dir reset` to restore `UPLOADS/DOWNLOADS`. Names may contain letters, numbers, spaces, hyphens, and underscores. The selection survives container and server restarts. It is captured when each job is queued, so changing the directory never changes already queued or active jobs.
+
+## Commands
+
+Type `.status`, `.queue`, `.dir [name|default|reset]`, `.cancel`, `.cancel <message_id>`, `.retry <message_id>`, `.config`, or `.help` in the monitored chat. Chat and sender authorization are applied before command or media processing. `.config` omits secrets.
+
+## Configuration reference
+
+`.env.example` is the authoritative full reference. Important controls include `RCLONE_BASE_PATH`, `DEFAULT_UPLOAD_DIRECTORY`, queue/concurrency limits, disk reserve and optional size ceiling, progress interval, rclone retry/checker/transfer parameters, collision policy (`rename`, `overwrite`, `skip`), local cleanup/failed retention, interrupted-job retry, rotating logs, and optional public links. `REMOTE_FOLDER_PATTERN` is deprecated, retained only for environment compatibility, and has no effect; date folders are disabled. `MAX_FILE_SIZE_GB=0` disables the application ceiling.
+
+Google Drive uploads use `RCLONE_DRIVE_CHUNK_SIZE=64Mi` by default instead of rclone's 8 MiB default. Larger chunks can improve resumable-upload throughput but consume that much memory per active transfer. Use `32Mi` on memory-constrained 1 GB instances and avoid memory utilization above roughly 85%. Google Drive does not support rclone's multi-thread single-file upload interface, so `RCLONE_TRANSFERS` only helps when separate files are uploading concurrently; it does not split one Drive file across parallel streams. `RCLONE_UPLOAD_TIMEOUT_MINUTES=180` stops a genuinely wedged cloud process; active progress is capped at 99.9% until rclone exits and remote size verification succeeds. When rclone retries, Telegram shows the attempt number, current-attempt progress, and the latest available rclone error instead of holding at the previous attempt's 99.9%. INFO-level rclone diagnostics are inspected for Drive/API failures, and `RCLONE_RETRIES_SLEEP_SECONDS=10` pauses between whole-file attempts.
+
+If a host repeatedly sends the complete file but loses Google Drive's final response, use `RCLONE_RETRIES=1` and `RCLONE_LOW_LEVEL_RETRIES=1`. The service checks the expected remote path and size up to six times over 30 seconds after a non-zero rclone exit. A committed object is treated as successful; a missing or wrong-sized object remains failed and retained locally for `.retry`.
+
+## Large files, recovery, and cleanup
+
+Files are never loaded wholly into memory. Telethon writes incrementally; rclone handles cloud-side retry/resumability according to the backend. A job begins only when free space covers its Telegram size plus the configured reserve. On restart, active JSON states become recoverable and are queued when `RETRY_INTERRUPTED_JOBS=true`; source messages must still exist. Successful local files are removed only after rclone exit and remote size verification. Failed files remain for `FAILED_FILE_RETENTION_HOURS` unless immediate partial deletion is enabled.
+
+The image includes `cryptg`, Telethon's native MTProto encryption accelerator. Actual download speed still depends on the route to the Telegram media data center; repeated connection resets or refused connections in the logs indicate a network/DC-path bottleneck rather than an application rate limit.
+
+Large Telegram files use four parallel aligned download lanes by default (`TELEGRAM_DOWNLOAD_CONNECTIONS=4`) once they reach `PARALLEL_DOWNLOAD_MIN_SIZE_MB=64`. Set the connection count to `1` to use Telethon's standard sequential downloader. More connections are not always faster and may worsen an unstable media-DC route; increase gradually and do not exceed the validated maximum of 16.
+
+## Security
+
+The container runs as non-root with all Linux capabilities dropped, exposes no ports, uses subprocess argument arrays (never a shell), and sanitizes filenames. Never commit `.env`, sessions, downloads, state, logs, or `rclone.conf`. The Telegram session grants account access: restrict its filesystem permissions, back it up encrypted, and revoke it from Telegram Active Sessions if exposed. Back up `data/session` and `config/rclone/rclone.conf` securely.
+
+`config/rclone` is intentionally mounted writable. OAuth remotes such as Google Drive refresh tokens and rclone persists them by creating a temporary file beside `rclone.conf` and atomically replacing the configuration. A read-only mount can make rclone retry an otherwise completed upload and create duplicate objects on providers that allow duplicate names. Restrict the host directory to the service account rather than mounting it read-only.
+
+Repository and Docker context rules exclude `.env` variants, Telegram sessions, rclone configuration, downloads, state, logs, image archives, private keys, IDE metadata, and caches. `.env.example` contains placeholders only. Never add production credentials to workflow YAML or Compose files; keep them in GitHub Actions secrets and server-mounted runtime files.
+
+## Testing and updates
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest -q
+python -m compileall app tests
+docker compose build --pull
+docker compose up -d
+```
+
+## Troubleshooting
+
+- **Session missing/expired:** rerun the one-shot authentication command.
+- **Remote invalid/quota/permission:** run `rclone about REMOTE: --config config/rclone/rclone.conf` and inspect service logs.
+- **Rclone config read-only:** make `config/rclone` writable by container UID 10001. OAuth token refresh cannot work on a read-only mount.
+- **Unhealthy container:** inspect `/data/state/health.json`, `docker compose ps`, and logs.
+- **Message ignored:** confirm watch mode/chat ID and sender ID allowlist.
+- **Disk rejection:** free space or lower `MIN_FREE_DISK_GB` cautiously.
+- **Flood waits:** transfers continue; progress edits resume later.
+- **File reference expired:** use `.retry`; if Telegram no longer serves it, forward the source again.
