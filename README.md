@@ -58,6 +58,45 @@ docker compose logs -f telegram-uploader
 
 Authentication requests the Telegram code and, if enabled, the 2FA password. Normal startup is non-interactive and fails with instructions if `/data/session/telegram.session` is absent. On bind-mounted Linux folders, ensure UID 10001 can write to `data/`.
 
+## Prebuilt Docker image
+
+Users who do not want to build the image can download a prebuilt archive from the repository's **Releases** page. Choose `telegram-uploader-linux-amd64.tar.gz` for normal Intel/AMD servers or `telegram-uploader-linux-arm64.tar.gz` for ARM64 servers such as Oracle Ampere. Check a Linux server with `uname -m`: `x86_64` means `amd64`, while `aarch64` or `arm64` means `arm64`.
+
+Download the matching image plus `docker-compose.prod.yml` and `env.example` from one release, then run:
+
+```bash
+mkdir -p ~/telegram-uploader/{data/downloads,data/state,data/session,data/logs,config/rclone}
+cd ~/telegram-uploader
+mv env.example .env
+# Edit .env before continuing.
+docker load -i telegram-uploader-linux-amd64.tar.gz  # Use the arm64 file on ARM64.
+```
+
+A first-time installation also needs an rclone configuration and Telegram login session:
+
+```bash
+docker run --rm -it \
+  -v "$PWD/config/rclone:/config/rclone" \
+  rclone/rclone config --config /config/rclone/rclone.conf
+
+docker compose -f docker-compose.prod.yml run --rm telegram-uploader python -m app.auth
+docker compose -f docker-compose.prod.yml up -d
+docker compose -f docker-compose.prod.yml logs -f telegram-uploader
+```
+
+For an update, preserve `.env`, `data/`, and `config/rclone/`; download and load the new image archive, replace `docker-compose.prod.yml`, and run `docker compose -f docker-compose.prod.yml up -d --force-recreate`.
+
+To generate the standard Docker archive locally:
+
+```bash
+docker build --pull -t telegram-uploader:latest .
+docker save --output telegram-uploader.tar telegram-uploader:latest
+# Optional on Linux, WSL, or Git Bash:
+gzip -9 telegram-uploader.tar
+```
+
+Both `.tar` and `.tar.gz` are valid inputs to `docker load`; `.tar.gz` is preferred for downloading because it is smaller. Do not commit either archive to normal Git history. To publish downloadable images, open **Actions -> Publish Prebuilt Docker Images -> Run workflow**, enter a version such as `v1.0.0`, and run it. The workflow builds both supported architectures and attaches the compressed images, production Compose file, environment template, and checksums to a GitHub Release.
+
 ## Production deployment with GitHub Actions
 
 Production uses [docker-compose.prod.yml](docker-compose.prod.yml). Commits to `main` that change application or deployment files run the tests, build `telegram-uploader:latest` on the GitHub runner, copy the saved image and production Compose file to Oracle, and recreate the service over SSH. The workflow can also be started manually from the GitHub Actions page.
