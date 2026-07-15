@@ -82,9 +82,15 @@ class Worker:
                 await self._download_parallel(message, path, job, download_progress)
             except JobCancelled:
                 raise
-            except Exception:
+            except Exception as exc:
                 LOG.exception("Parallel Telegram download failed for %s; restarting sequentially", job.job_key)
                 job.bytes_processed, job.progress_percent = 0, 0
+                job.speed_bytes_per_second, job.eta_seconds = 0, None
+                await self.progress.update(
+                    job,
+                    f"Parallel Telegram download interrupted; restarting sequentially\nReason: {str(exc)[:300]}",
+                    force=True,
+                )
                 await self.client.download_media(message, file=str(path), progress_callback=download_progress)
         else:
             await self.client.download_media(message, file=str(path), progress_callback=download_progress)
@@ -174,7 +180,19 @@ class Worker:
             )
             try:
                 with path.open("r+b", buffering=0) as handle:
-                    async for chunk in iterator:
+                    while True:
+                        try:
+                            chunk = await asyncio.wait_for(
+                                iterator.__anext__(),
+                                timeout=self.settings.telegram_download_stall_timeout_seconds,
+                            )
+                        except StopAsyncIteration:
+                            break
+                        except asyncio.TimeoutError as exc:
+                            raise TimeoutError(
+                                f"Telegram download lane {index + 1} received no data for "
+                                f"{self.settings.telegram_download_stall_timeout_seconds:g} seconds"
+                            ) from exc
                         if self.queue.is_cancelled(job.job_key):
                             raise JobCancelled("Download cancelled")
                         data = bytes(chunk)
@@ -187,7 +205,17 @@ class Worker:
                 await iterator.close()
 
         LOG.info("Starting parallel Telegram download for %s with %s connections", job.job_key, connections)
-        await asyncio.gather(*(lane(index) for index in range(connections)))
+        tasks = [asyncio.create_task(lane(index)) for index in range(connections)]
+        try:
+            await asyncio.gather(*tasks)
+        except BaseException:
+            # asyncio.gather propagates the first exception without cancelling
+            # its other children. Stop every lane before sequential fallback
+            # rewrites the same destination file.
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
     @staticmethod
     def _preallocate(path: Path, size: int) -> None:

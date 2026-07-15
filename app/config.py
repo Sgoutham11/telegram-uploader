@@ -34,7 +34,8 @@ class Settings(BaseSettings):
     max_file_size_gb: float = Field(0, ge=0)
     min_free_disk_gb: float = Field(5, ge=0)
     progress_update_interval_seconds: float = Field(5, ge=1)
-    telegram_download_connections: int = Field(2, ge=1, le=16)
+    telegram_download_connections: int = Field(4, ge=1, le=16)
+    telegram_download_stall_timeout_seconds: float = Field(120, gt=0)
     parallel_download_min_size_mb: int = Field(64, ge=1)
     rclone_transfers: int = Field(1, ge=1)
     rclone_checkers: int = Field(2, ge=1)
@@ -42,7 +43,7 @@ class Settings(BaseSettings):
     rclone_low_level_retries: int = Field(10, ge=0)
     rclone_retries_sleep_seconds: int = Field(10, ge=0)
     rclone_stats_interval_seconds: int = Field(2, ge=1)
-    rclone_drive_chunk_size: str = "32Mi"
+    rclone_drive_chunk_size: str = "64Mi"
     rclone_upload_timeout_minutes: int = Field(180, ge=1)
     rclone_extra_args: str = ""
     delete_local_after_success: bool = True
@@ -84,7 +85,7 @@ class Settings(BaseSettings):
     @classmethod
     def drive_chunk_size_is_safe(cls, value: str) -> str:
         if not re.fullmatch(r"[1-9][0-9]*(?:Ki|Mi|Gi|K|M|G)?", value):
-            raise ValueError("RCLONE_DRIVE_CHUNK_SIZE must be a positive rclone size such as 32Mi")
+            raise ValueError("RCLONE_DRIVE_CHUNK_SIZE must be a positive rclone size such as 64Mi")
         return value
 
     @model_validator(mode="after")

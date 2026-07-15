@@ -55,10 +55,11 @@ def test_low_memory_defaults(monkeypatch):
     for key, value in BASE.items(): monkeypatch.setenv(key, value)
     settings = Settings(_env_file=None)
     assert settings.max_concurrent_jobs == 1
-    assert settings.telegram_download_connections == 2
+    assert settings.telegram_download_connections == 4
+    assert settings.telegram_download_stall_timeout_seconds == 120
     assert settings.rclone_transfers == 1
     assert settings.rclone_checkers == 2
-    assert settings.rclone_drive_chunk_size == "32Mi"
+    assert settings.rclone_drive_chunk_size == "64Mi"
 
 
 def test_runtime_requires_writable_rclone_directory(tmp_path, monkeypatch):
