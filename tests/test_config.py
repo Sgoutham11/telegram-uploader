@@ -51,6 +51,16 @@ def test_authorization(monkeypatch):
     assert not settings.is_authorized(8, 9)
 
 
+def test_low_memory_defaults(monkeypatch):
+    for key, value in BASE.items(): monkeypatch.setenv(key, value)
+    settings = Settings(_env_file=None)
+    assert settings.max_concurrent_jobs == 1
+    assert settings.telegram_download_connections == 2
+    assert settings.rclone_transfers == 1
+    assert settings.rclone_checkers == 2
+    assert settings.rclone_drive_chunk_size == "32Mi"
+
+
 def test_runtime_requires_writable_rclone_directory(tmp_path, monkeypatch):
     for key, value in BASE.items(): monkeypatch.setenv(key, value)
     config_dir = tmp_path / "config"
