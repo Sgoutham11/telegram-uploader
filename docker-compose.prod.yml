@@ -2,6 +2,9 @@ services:
   telegram-uploader:
     image: telegram-uploader:latest
     container_name: telegram-uploader
+    mem_limit: 700m
+    mem_reservation: 256m
+    pids_limit: 128
     env_file:
       - .env
     volumes:
