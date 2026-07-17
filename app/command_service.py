@@ -17,28 +17,30 @@ class CommandService:
     async def handle(self, event: object) -> None:
         text = event.raw_text.strip()
         command, *args = text.split(maxsplit=1)
+        user_id = event.sender_id or 0
         if command == ".help":
-            response = ".status - active transfer\n.queue - pending jobs\n.dir <name> - Set the upload directory for new files\n.dir - Show the current upload directory\n.dir default - Reset to the default directory\n.cancel [message_id] - cancel a job\n.retry <message_id> - retry failed job\n.config - safe configuration\n.help - this help"
+            response = ".status - active transfer\n.queue - pending jobs\n.dir <name> - Set your upload directory (nested paths supported)\n.dir - Show your current upload directory\n.dir default - Reset your directory to the default\n.cancel [message_id] - cancel a job\n.retry <message_id> - retry failed job\n.config - safe configuration\n.help - this help"
         elif command == ".dir":
-            current = await self.directories.get_current_directory()
-            destination = self.directories.build_destination_directory(current)
+            current = await self.directories.get_user_current_directory(user_id)
+            destination = self.directories.build_destination_directory(user_id, current)
             if not args:
                 response = f"Current upload directory: {current}\nDestination: {destination}"
             elif args[0].strip().lower() in {"default", "reset"}:
-                current = await self.directories.reset_directory(event.sender_id or 0)
-                response = f"Upload directory reset\n\nCurrent directory: {current}\nDestination: {self.directories.build_destination_directory(current)}"
+                current = await self.directories.reset_user_current_directory(user_id)
+                response = f"Upload directory reset\n\nCurrent directory: {current}\nDestination: {self.directories.build_destination_directory(user_id, current)}"
             else:
                 try:
-                    current = await self.directories.set_directory(args[0], event.sender_id or 0)
-                    response = f"Upload directory changed\n\nCurrent directory: {current}\nDestination: {self.directories.build_destination_directory(current)}"
+                    current = await self.directories.set_user_current_directory(user_id, args[0])
+                    response = f"Upload directory changed\n\nCurrent directory: {current}\nDestination: {self.directories.build_destination_directory(user_id, current)}"
                 except ValueError:
-                    response = "Invalid directory name.\nUse only letters, numbers, spaces, hyphens, and underscores."
+                    response = "Invalid directory name.\nUse letters, numbers, spaces, hyphens, and underscores, with / between nested folders."
         elif command == ".status":
             active = next(iter(self.queue.active.values()), None)
             free = shutil.disk_usage(self.settings.download_dir).free
-            current = await self.directories.get_current_directory()
-            current_line = f"Current default directory: {current}"
-            response = f"Active: {active.filename}\nPhase: {active.status}\nProgress: {active.progress_percent:.1f}%\nSpeed: {format_bytes(active.speed_bytes_per_second)}/s\nETA: {format_duration(active.eta_seconds)}\n{current_line}\nActive job directory: {active.upload_directory}\nDestination: {active.remote_path or self.settings.rclone_remote + ':' + self.directories.build_destination_directory(active.upload_directory) + '/' + active.filename}\nQueue: {self.queue.queue.qsize()}\nDisk free: {format_bytes(free)}" if active else f"Active: none\n{current_line}\nDestination: {self.directories.build_destination_directory(current)}\nQueue: {self.queue.queue.qsize()}\nDisk free: {format_bytes(free)}\nRemote: {self.settings.rclone_remote}:"
+            current = await self.directories.get_user_current_directory(user_id)
+            current_line = f"Your current directory: {current}"
+            active_destination = self.directories.build_snapshot_destination_directory(active.upload_username, active.upload_directory) if active else ""
+            response = f"Active: {active.filename}\nPhase: {active.status}\nProgress: {active.progress_percent:.1f}%\nSpeed: {format_bytes(active.speed_bytes_per_second)}/s\nETA: {format_duration(active.eta_seconds)}\n{current_line}\nActive job directory: {active.upload_directory}\nDestination: {active.remote_path or self.settings.rclone_remote + ':' + active_destination + '/' + active.filename}\nQueue: {self.queue.queue.qsize()}\nDisk free: {format_bytes(free)}" if active else f"Active: none\n{current_line}\nDestination: {self.directories.build_destination_directory(user_id, current)}\nQueue: {self.queue.queue.qsize()}\nDisk free: {format_bytes(free)}\nRemote: {self.settings.rclone_remote}:"
         elif command == ".queue":
             rows = [f"{i}. {j.filename}\n   Size: {format_bytes(j.file_size)}\n   Directory: {j.upload_directory}\n   Message ID: {j.message_id}" for i, j in enumerate(self.queue.snapshot(), 1)]
             response = "Pending jobs:\n" + ("\n".join(rows) if rows else "none")
@@ -58,8 +60,8 @@ class CommandService:
             else:
                 response = "Retryable job not found."
         elif command == ".config":
-            current = await self.directories.get_current_directory()
-            response = f"Configuration:\nRoot path: {self.settings.rclone_base_path}\nDefault directory: {self.settings.default_upload_directory}\nCurrent directory: {current}\nRemote: {self.settings.rclone_remote}\nCollision policy: {self.settings.remote_collision_policy}"
+            current = await self.directories.get_user_current_directory(user_id)
+            response = f"Configuration:\nRoot path: {self.settings.rclone_base_path}\nConfigured username: {self.directories.get_allowed_username(user_id)}\nDefault directory: {self.settings.default_upload_directory}\nYour current directory: {current}\nRemote: {self.settings.rclone_remote}\nCollision policy: {self.settings.remote_collision_policy}"
         else:
             return
         await event.reply(response[:4000])

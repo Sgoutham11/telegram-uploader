@@ -1,10 +1,10 @@
 # Telegram Cloud Uploader
 
-A production-oriented, Dockerized Python 3.12 service that uses a normal Telegram account through Telethon/MTProto. Forward any Telegram media into Saved Messages or one configured private chat; the service streams it to disk and transfers it to any rclone-supported cloud. Albums are handled consistently as one independent job per Telegram message while preserving `media_group_id` in state.
+A production-oriented, Dockerized Python 3.12 service that uses a normal Telegram account through Telethon/MTProto. Trusted users forward media into one configured private Telegram group; the service streams it to disk and transfers it to per-user directories on any rclone-supported cloud. Albums are handled consistently as one independent job per Telegram message while preserving `media_group_id` in state.
 
 ## Architecture
 
-`Telethon event handler -> bounded asyncio queue -> download worker -> rclone copyto -> remote verification`. Each message has an atomic JSON state file in `/data/state`; downloads use isolated `/data/downloads/{chat_id}_{message_id}` directories. The current upload directory is atomically persisted in `/data/state/current_directory.json`. No database or public port is used.
+`Telethon event handler -> sender allowlist -> bounded asyncio queue -> download worker -> rclone copyto -> remote verification`. Each message has an atomic JSON state file in `/data/state`; downloads use isolated `/data/downloads/{chat_id}_{message_id}` directories. Per-user directory selections are atomically persisted by Telegram user ID in `/data/state/user_directories.json`. No database or public port is used.
 
 ## Prerequisites
 
@@ -27,7 +27,37 @@ Copy-Item .env.example .env
 New-Item -ItemType Directory -Force data/downloads,data/state,data/session,data/logs,config/rclone
 ```
 
-Put the API credentials from my.telegram.org in `.env`. For Saved Messages use `WATCH_MODE=saved_messages`. For a group/channel use `WATCH_MODE=chat` and its numeric `WATCH_CHAT_ID` (commonly `-100...`). IDs can be found by temporarily enabling Telethon debug logs or using a trusted ID-info tool; never give an untrusted bot sensitive forwarded content. Set `ALLOWED_USER_IDS`; when empty, only the logged-in account is accepted.
+Put the API credentials from my.telegram.org in `.env`, set `WATCH_MODE=chat`, and set `WATCH_CHAT_ID` to the private group's numeric ID (commonly `-100...`). Configure trusted Telegram IDs and their cloud directory names as ordered lists:
+
+```env
+WATCH_MODE=chat
+WATCH_CHAT_ID=-1001234567890
+ALLOWED_USER_IDS=111111111,222222222
+ALLOWED_USER_NAME=GOUTHAM,GALAXY
+```
+
+The lists map by position: `111111111 -> GOUTHAM` and `222222222 -> GALAXY`. They must have equal, non-zero lengths; IDs and names must be unique. Startup fails on an invalid mapping. Messages from other chats or senders are silently ignored. Obtain IDs from trusted tooling or Telegram logs; never give an untrusted bot sensitive forwarded content.
+
+### Discover Telegram IDs during setup
+
+If the private group ID or user IDs are not yet known, temporarily enable ID debugging. Debug mode permits startup without `WATCH_CHAT_ID` or an allowlist. While either is missing, discovery-only mode disables new uploads and interrupted-job recovery; only identifier logging remains active.
+
+```env
+WATCH_MODE=chat
+WATCH_CHAT_ID=
+DEBUG_TELEGRAM_IDS=true
+ALLOWED_USER_IDS=
+ALLOWED_USER_NAME=
+```
+
+Start the service and send one message in the desired private group:
+
+```bash
+docker compose -f docker-compose.prod.yml up -d --force-recreate
+docker compose -f docker-compose.prod.yml logs -f telegram-uploader
+```
+
+The log block reports the chat ID for `WATCH_CHAT_ID`, sender ID for `ALLOWED_USER_IDS`, sender display name, username, chat type, and message type. After collecting every trusted user's ID, configure the two ordered allowlist variables, set `DEBUG_TELEGRAM_IDS=false`, and restart. Debugging logs setup metadata and message text from every received Telegram message before filtering; keep it disabled outside this short setup window.
 
 ## Configure rclone
 
@@ -136,32 +166,32 @@ docker load -i telegram-uploader.tar
 docker compose -f docker-compose.prod.yml up -d --force-recreate --remove-orphans
 ```
 
-## Persistent upload directory
+## Per-user persistent upload directories
 
-With `RCLONE_BASE_PATH=UPLOADS` and `DEFAULT_UPLOAD_DIRECTORY=DOWNLOADS`, forwarding a file uses:
+With `RCLONE_BASE_PATH=UPLOADS`, `DEFAULT_UPLOAD_DIRECTORY=DOWNLOADS`, and the mapping `111111111 -> GOUTHAM`, that user initially uploads to:
 
 ```text
 Forward file
-→ UPLOADS/DOWNLOADS/file.mkv
+→ UPLOADS/GOUTHAM/DOWNLOADS/file.mkv
 ```
 
-Select a directory for subsequently forwarded files:
+That user can select a nested directory for subsequently forwarded files:
 
 ```text
-.dir goutham
+.dir Series/Friends
 Forward file
-→ UPLOADS/goutham/file.mkv
+→ UPLOADS/GOUTHAM/Series/Friends/file.mkv
 ```
 
-Use `.dir` to show the current directory and `.dir default` or `.dir reset` to restore `UPLOADS/DOWNLOADS`. Names may contain letters, numbers, spaces, hyphens, and underscores. The selection survives container and server restarts. It is captured when each job is queued, so changing the directory never changes already queued or active jobs.
+Another configured user, such as `GALAXY`, has an independent selection under `UPLOADS/GALAXY/...`; one user's `.dir` command never affects another user. Use `.dir` to show your current directory and `.dir default` or `.dir reset` to restore your own default. Each path segment may contain letters, numbers, spaces, hyphens, and underscores; use `/` between nested folders. Selections survive container and server restarts and are captured when each job is queued, so later changes never alter queued or active jobs.
 
 ## Commands
 
-Type `.status`, `.queue`, `.dir [name|default|reset]`, `.cancel`, `.cancel <message_id>`, `.retry <message_id>`, `.config`, or `.help` in the monitored chat. Chat and sender authorization are applied before command or media processing. `.config` omits secrets.
+Type `.status`, `.queue`, `.dir [path|default|reset]`, `.cancel`, `.cancel <message_id>`, `.retry <message_id>`, `.config`, or `.help` in the monitored private group. Chat and sender authorization are applied before command or media processing. `.config` omits secrets.
 
 ## Configuration reference
 
-`.env.example` is the authoritative full reference. Important controls include `RCLONE_BASE_PATH`, `DEFAULT_UPLOAD_DIRECTORY`, queue/concurrency limits, disk reserve and optional size ceiling, progress interval, rclone retry/checker/transfer parameters, collision policy (`rename`, `overwrite`, `skip`), local cleanup/failed retention, interrupted-job retry, rotating logs, and optional public links. `REMOTE_FOLDER_PATTERN` is deprecated, retained only for environment compatibility, and has no effect; date folders are disabled. `MAX_FILE_SIZE_GB=0` disables the application ceiling.
+`.env.example` is the authoritative full reference. `ALLOWED_USER_IDS` and `ALLOWED_USER_NAME` are ordered lists that define authorization and each user's top-level cloud directory. `DEBUG_TELEGRAM_IDS=false` is the production-safe default and should be enabled only while discovering initial setup identifiers. Important controls also include `RCLONE_BASE_PATH`, `DEFAULT_UPLOAD_DIRECTORY`, queue/concurrency limits, disk reserve and optional size ceiling, progress interval, rclone retry/checker/transfer parameters, collision policy (`rename`, `overwrite`, `skip`), local cleanup/failed retention, interrupted-job retry, rotating logs, and optional public links. `REMOTE_FOLDER_PATTERN` is deprecated, retained only for environment compatibility, and has no effect; date folders are disabled. `MAX_FILE_SIZE_GB=0` disables the application ceiling.
 
 Google Drive uploads use `RCLONE_DRIVE_CHUNK_SIZE=64Mi` by default. The observed peak on a 1 GB deployment remained far below the production container's 700 MiB hard limit, leaving room for this larger upload buffer. Larger chunks can improve resumable-upload throughput but consume that much memory per active transfer. Production Compose reserves 256 MiB and limits the service to 128 processes. Keep `MAX_CONCURRENT_JOBS=1`, `RCLONE_TRANSFERS=1`, and `RCLONE_CHECKERS=2` on a 1 GB instance. Google Drive does not support rclone's multi-thread single-file upload interface, so `RCLONE_TRANSFERS` only helps when separate files are uploading concurrently; it does not split one Drive file across parallel streams. `RCLONE_UPLOAD_TIMEOUT_MINUTES=180` stops a genuinely wedged cloud process; active progress is capped at 99.9% until rclone exits and remote size verification succeeds. When rclone retries, Telegram shows the attempt number, current-attempt progress, and the latest available rclone error instead of holding at the previous attempt's 99.9%. INFO-level rclone diagnostics are inspected for Drive/API failures, and `RCLONE_RETRIES_SLEEP_SECONDS=10` pauses between whole-file attempts.
 
@@ -201,7 +231,9 @@ docker compose up -d
 - **Remote invalid/quota/permission:** run `rclone about REMOTE: --config config/rclone/rclone.conf` and inspect service logs.
 - **Rclone config read-only:** make `config/rclone` writable by container UID 10001. OAuth token refresh cannot work on a read-only mount.
 - **Unhealthy container:** inspect `/data/state/health.json`, `docker compose ps`, and logs.
-- **Message ignored:** confirm watch mode/chat ID and sender ID allowlist.
+- **Message ignored:** confirm `WATCH_MODE=chat`, the private `WATCH_CHAT_ID`, and that the sender has a position-matched entry in both allowed-user lists.
+- **Startup mapping error:** ensure `ALLOWED_USER_IDS` and `ALLOWED_USER_NAME` have the same number of unique comma-separated entries.
+- **Unknown chat ID:** temporarily set `DEBUG_TELEGRAM_IDS=true`, send a group message, copy the logged chat ID, then disable debugging.
 - **Disk rejection:** free space or lower `MIN_FREE_DISK_GB` cautiously.
 - **Flood waits:** transfers continue; progress edits resume later.
 - **File reference expired:** use `.retry`; if Telegram no longer serves it, forward the source again.

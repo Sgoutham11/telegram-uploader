@@ -10,10 +10,13 @@ BASE = {"TELEGRAM_API_ID": "123", "TELEGRAM_API_HASH": "hash"}
 def test_environment_parsing(monkeypatch):
     for key, value in BASE.items(): monkeypatch.setenv(key, value)
     monkeypatch.setenv("ALLOWED_USER_IDS", "1, 2")
+    monkeypatch.setenv("ALLOWED_USER_NAME", "GOUTHAM, GALAXY")
     monkeypatch.setenv("DELETE_LOCAL_AFTER_SUCCESS", "false")
     monkeypatch.setenv("TELEGRAM_DOWNLOAD_CONNECTIONS", "6")
     settings = Settings(_env_file=None)
     assert settings.allowed_user_ids == [1, 2]
+    assert settings.allowed_user_names == ["GOUTHAM", "GALAXY"]
+    assert settings.get_allowed_username(2) == "GALAXY"
     assert settings.delete_local_after_success is False
     assert settings.telegram_download_connections == 6
     assert settings.default_upload_directory == "DOWNLOADS"
@@ -24,6 +27,58 @@ def test_chat_mode_requires_id(monkeypatch):
     for key, value in BASE.items(): monkeypatch.setenv(key, value)
     with pytest.raises(ValidationError):
         Settings(_env_file=None, watch_mode="chat")
+
+
+def test_allowed_user_lists_must_have_equal_lengths(monkeypatch):
+    for key, value in BASE.items(): monkeypatch.setenv(key, value)
+    with pytest.raises(ValidationError, match="same number of entries"):
+        Settings(_env_file=None, allowed_user_ids=[1, 2], allowed_user_names=["GOUTHAM"])
+
+
+def test_chat_mode_requires_nonempty_allowlist(monkeypatch):
+    for key, value in BASE.items(): monkeypatch.setenv(key, value)
+    with pytest.raises(ValidationError, match="at least one entry"):
+        Settings(_env_file=None, watch_mode="chat", watch_chat_id=-100123)
+
+
+def test_debug_id_mode_allows_initial_chat_discovery(monkeypatch):
+    for key, value in BASE.items(): monkeypatch.setenv(key, value)
+    settings = Settings(_env_file=None, watch_mode="chat", debug_telegram_ids=True)
+    assert settings.watch_chat_id is None
+    assert settings.allowed_users == {}
+    assert settings.telegram_id_discovery_only is True
+
+
+def test_debug_id_mode_accepts_empty_chat_id_from_docker_env(monkeypatch):
+    for key, value in BASE.items(): monkeypatch.setenv(key, value)
+    settings = Settings(_env_file=None, watch_mode="chat", watch_chat_id="", debug_telegram_ids=True)
+    assert settings.watch_chat_id is None
+
+
+def test_empty_chat_id_still_fails_when_debugging_is_disabled(monkeypatch):
+    for key, value in BASE.items(): monkeypatch.setenv(key, value)
+    with pytest.raises(ValidationError, match="WATCH_CHAT_ID is required"):
+        Settings(
+            _env_file=None,
+            watch_mode="chat",
+            watch_chat_id="",
+            debug_telegram_ids=False,
+            allowed_user_ids=[1],
+            allowed_user_names=["GOUTHAM"],
+        )
+
+
+def test_debugging_with_complete_configuration_is_not_discovery_only(monkeypatch):
+    for key, value in BASE.items(): monkeypatch.setenv(key, value)
+    settings = Settings(
+        _env_file=None,
+        watch_mode="chat",
+        watch_chat_id=-100123,
+        debug_telegram_ids=True,
+        allowed_user_ids=[1],
+        allowed_user_names=["GOUTHAM"],
+    )
+    assert settings.telegram_id_discovery_only is False
 
 
 def test_invalid_drive_chunk_size(monkeypatch):
@@ -46,9 +101,11 @@ def test_retry_sleep_must_not_be_negative(monkeypatch):
 
 def test_authorization(monkeypatch):
     for key, value in BASE.items(): monkeypatch.setenv(key, value)
-    settings = Settings(_env_file=None)
+    settings = Settings(_env_file=None, allowed_user_ids=[9], allowed_user_names=["GOUTHAM"])
     assert settings.is_authorized(9, 9)
     assert not settings.is_authorized(8, 9)
+    with pytest.raises(PermissionError):
+        settings.get_allowed_username(8)
 
 
 def test_low_memory_defaults(monkeypatch):

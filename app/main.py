@@ -39,7 +39,7 @@ async def run() -> None:
     configure_logging(settings)
     settings.validate_runtime()
     state = StateStore(settings.state_dir)
-    directories = DirectoryService(settings.state_dir, settings.rclone_base_path, settings.default_upload_directory)
+    directories = DirectoryService(settings.state_dir, settings.rclone_base_path, settings.default_upload_directory, settings.allowed_users)
     await directories.load()
     queue = QueueManager(settings.queue_max_size)
     rclone = RcloneService(settings)
@@ -54,8 +54,11 @@ async def run() -> None:
     progress = ProgressService(client, settings.progress_update_interval_seconds)
     worker_objects = [Worker(client, settings, queue, state, FileService(settings), rclone, progress) for _ in range(settings.max_concurrent_jobs)]
     worker_tasks = [asyncio.create_task(w.run(), name=f"worker-{i}") for i, w in enumerate(worker_objects)]
-    for job in await state.recover(settings.retry_interrupted_jobs):
-        await queue.add(job)
+    if settings.telegram_id_discovery_only:
+        LOG.warning("Telegram ID discovery-only mode is active; uploads and interrupted-job recovery are disabled")
+    else:
+        for job in await state.recover(settings.retry_interrupted_jobs):
+            await queue.add(job)
     cleanup_task = asyncio.create_task(CleanupService(settings, state, queue).run(), name="cleanup")
     health_task = asyncio.create_task(write_health(settings.state_dir / "health.json", client, worker_tasks), name="health")
     stop = asyncio.Event()
