@@ -97,7 +97,7 @@ class Worker:
         if not path.is_file() or path.stat().st_size != job.file_size:
             raise IOError("Downloaded file size does not match Telegram metadata")
         job.status, job.bytes_processed, job.progress_percent = JobStatus.DOWNLOADED, 0, 0
-        job.remote_path = self.rclone.build_remote_path(job.filename, job.upload_directory)
+        job.remote_path = self.rclone.build_remote_path(job.filename, job.remote_directory)
         job.remote_path = await self.rclone.resolve_collision(job.remote_path)
         job.status = JobStatus.UPLOADING
         await self.state.save(job)

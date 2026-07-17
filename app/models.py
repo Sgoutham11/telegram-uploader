@@ -29,6 +29,7 @@ class UploadJob(BaseModel):
     message_id: int
     sender_id: int
     filename: str
+    upload_username: str = ""
     upload_directory: str = "DOWNLOADS"
     file_size: int = 0
     media_group_id: str | None = None
@@ -49,9 +50,25 @@ class UploadJob(BaseModel):
     @classmethod
     def upload_directory_is_safe(cls, value: str) -> str:
         value = value.strip()
-        if value in {"", ".", ".."} or not re.fullmatch(r"[A-Za-z0-9 _-]{1,100}", value):
+        parts = [part.strip() for part in value.split("/")]
+        if not parts or len(parts) > 10 or len(value) > 500 or any(
+            part in {"", ".", ".."} or not re.fullmatch(r"[A-Za-z0-9 _-]{1,100}", part)
+            for part in parts
+        ):
             raise ValueError("invalid upload directory")
+        return "/".join(parts)
+
+    @field_validator("upload_username")
+    @classmethod
+    def upload_username_is_safe(cls, value: str) -> str:
+        value = value.strip()
+        if value and (value in {".", ".."} or not re.fullmatch(r"[A-Za-z0-9 _-]{1,100}", value)):
+            raise ValueError("invalid upload username")
         return value
+
+    @property
+    def remote_directory(self) -> str:
+        return f"{self.upload_username}/{self.upload_directory}" if self.upload_username else self.upload_directory
 
     @property
     def directory(self) -> Path | None:

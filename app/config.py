@@ -11,7 +11,7 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False, populate_by_name=True)
 
     telegram_api_id: int
     telegram_api_hash: str
@@ -19,7 +19,9 @@ class Settings(BaseSettings):
     telegram_session_path: Path = Path("/data/session/telegram.session")
     watch_mode: Literal["saved_messages", "chat"] = "saved_messages"
     watch_chat_id: int | None = None
+    debug_telegram_ids: bool = False
     allowed_user_ids: Annotated[list[int], NoDecode] = Field(default_factory=list)
+    allowed_user_names: Annotated[list[str], NoDecode] = Field(default_factory=list, validation_alias="ALLOWED_USER_NAME")
     rclone_remote: str = "gdrive"
     rclone_base_path: str = "UPLOADS"
     default_upload_directory: str = "DOWNLOADS"
@@ -66,6 +68,32 @@ class Settings(BaseSettings):
             return [int(x.strip()) for x in value.split(",") if x.strip()]
         return value
 
+    @field_validator("watch_chat_id", mode="before")
+    @classmethod
+    def parse_optional_chat_id(cls, value: object) -> object:
+        if value in (None, ""):
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("allowed_user_names", mode="before")
+    @classmethod
+    def parse_user_names(cls, value: object) -> object:
+        if value in (None, ""):
+            return []
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @field_validator("allowed_user_names")
+    @classmethod
+    def user_names_are_safe(cls, value: list[str]) -> list[str]:
+        for name in value:
+            if not re.fullmatch(r"[A-Za-z0-9 _-]{1,100}", name) or name in {".", ".."}:
+                raise ValueError("ALLOWED_USER_NAME entries may contain only letters, numbers, spaces, hyphens, and underscores")
+        return value
+
     @field_validator("rclone_remote")
     @classmethod
     def remote_name_is_safe(cls, value: str) -> str:
@@ -90,8 +118,17 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_mode(self) -> "Settings":
-        if self.watch_mode == "chat" and self.watch_chat_id is None:
+        if self.watch_mode == "chat" and self.watch_chat_id is None and not self.debug_telegram_ids:
             raise ValueError("WATCH_CHAT_ID is required when WATCH_MODE=chat")
+        if len(self.allowed_user_ids) != len(self.allowed_user_names):
+            raise ValueError("ALLOWED_USER_IDS and ALLOWED_USER_NAME must contain the same number of entries")
+        if len(set(self.allowed_user_ids)) != len(self.allowed_user_ids):
+            raise ValueError("ALLOWED_USER_IDS must not contain duplicates")
+        normalized_names = [name.casefold() for name in self.allowed_user_names]
+        if len(set(normalized_names)) != len(normalized_names):
+            raise ValueError("ALLOWED_USER_NAME must not contain duplicate names")
+        if self.watch_mode == "chat" and not self.allowed_user_ids and not self.debug_telegram_ids:
+            raise ValueError("ALLOWED_USER_IDS and ALLOWED_USER_NAME require at least one entry when WATCH_MODE=chat")
         return self
 
     def prepare_directories(self) -> None:
@@ -123,8 +160,24 @@ class Settings(BaseSettings):
         if require_session and not session_exists(self.telegram_session_path):
             raise ValueError("Telegram session missing; run: python -m app.auth")
 
-    def is_authorized(self, sender_id: int, self_id: int) -> bool:
-        return sender_id in (self.allowed_user_ids or [self_id])
+    @property
+    def allowed_users(self) -> dict[int, str]:
+        return dict(zip(self.allowed_user_ids, self.allowed_user_names, strict=True))
+
+    @property
+    def telegram_id_discovery_only(self) -> bool:
+        return self.debug_telegram_ids and self.watch_mode == "chat" and (
+            self.watch_chat_id is None or not self.allowed_user_ids
+        )
+
+    def get_allowed_username(self, user_id: int) -> str:
+        try:
+            return self.allowed_users[user_id]
+        except KeyError as exc:
+            raise PermissionError(f"Telegram user {user_id} is not allowed") from exc
+
+    def is_authorized(self, sender_id: int, self_id: int | None = None) -> bool:
+        return sender_id in self.allowed_users
 
     def public_dict(self) -> dict[str, object]:
         hidden = {"telegram_api_hash", "telegram_phone"}
