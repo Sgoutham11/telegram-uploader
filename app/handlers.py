@@ -120,8 +120,7 @@ def register_handlers(client: object, settings: Settings, queue: QueueManager, s
                 and not settings.telegram_id_discovery_only
                 and settings.allowed_user_ids
             ):
-#                 owner_id = settings.allowed_user_ids[0]
-                await event.reply(f'DM admin @sgoutham11 to access the streaming platform.')
+                await event.reply("DM admin @sgoutham11 to access the streaming platform.")
             return
         if event.raw_text.strip().startswith("."):
             await commands.handle(event)
