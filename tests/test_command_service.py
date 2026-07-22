@@ -1,4 +1,6 @@
+import asyncio
 import logging
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from app.command_service import CommandService
@@ -165,3 +167,37 @@ async def test_debug_disabled_does_not_fetch_entities(tmp_path):
             raise AssertionError("sender lookup must not run")
 
     await client.handler(NoFetchEvent("Hello", sender_id=999))
+
+
+async def test_concurrent_files_receive_distinct_queue_positions(tmp_path):
+    commands, directories = await service(tmp_path)
+    client = FakeClient()
+    register_handlers(client, commands.settings, commands.queue, commands.state, commands, directories, self_id=123)
+
+    class StatusReply:
+        def __init__(self, message_id):
+            self.id = message_id
+
+    class MediaEvent(Event):
+        chat_id = -100123
+
+        def __init__(self, message_id):
+            super().__init__("", sender_id=123)
+            self.message = SimpleNamespace(
+                id=message_id,
+                media=SimpleNamespace(),
+                file=SimpleNamespace(size=1024, name=f"file-{message_id}.bin", mime_type="application/octet-stream"),
+                date=datetime.now(timezone.utc),
+                grouped_id=None,
+            )
+
+        async def reply(self, text):
+            # Ensure all concurrent handlers reach the old race window.
+            await asyncio.sleep(0.01)
+            self.replies.append(text)
+            return StatusReply(self.message.id + 1000)
+
+    events = [MediaEvent(message_id) for message_id in (1, 2, 3)]
+    await asyncio.gather(*(client.handler(event) for event in events))
+
+    assert [event.replies[0].rsplit("Position: ", 1)[1] for event in events] == ["1", "2", "3"]

@@ -96,6 +96,7 @@ async def log_debug_telegram_ids(event: object) -> None:
 
 def register_handlers(client: object, settings: Settings, queue: QueueManager, state: StateStore, commands: CommandService, directories: DirectoryService, self_id: int) -> None:
     completed: set[str] = set()
+    enqueue_lock = asyncio.Lock()
 
     async def initialize() -> None:
         completed.update(k for k, j in (await state.load_all()).items() if j.status == JobStatus.COMPLETED)
@@ -127,37 +128,41 @@ def register_handlers(client: object, settings: Settings, queue: QueueManager, s
             return
         if not event.message.media:
             return
-        key = f"{event.chat_id}:{event.message.id}"
-        if key in completed or key in queue.pending or key in queue.active:
-            await event.reply("This Telegram message was already processed.")
-            return
-        file = event.message.file
-        size = int(getattr(file, "size", 0) or 0)
-        original = getattr(file, "name", None)
-        media_type = event.message.media.__class__.__name__.lower()
-        timestamp = event.message.date.astimezone(timezone.utc)
-        filename = sanitize_filename(original or fallback_filename(event.message.id, media_type, timestamp, getattr(file, "mime_type", None)))
-        upload_directory = await directories.get_user_current_directory(sender_id)
-        upload_username = directories.get_allowed_username(sender_id)
-        job = UploadJob(job_key=key, chat_id=event.chat_id, message_id=event.message.id, sender_id=sender_id, filename=filename, file_size=size, upload_username=upload_username, upload_directory=upload_directory, media_group_id=str(event.message.grouped_id) if event.message.grouped_id else None)
-        if queue.queue.full():
-            await event.reply("Upload queue is full. Please retry later.")
-            return
-        # Create and persist the status message before exposing the job to a
-        # worker. Otherwise a fast worker can start with no message ID and all
-        # early progress edits are lost.
-        position = queue.queue.qsize() + 1
-        destination = directories.build_destination_directory(sender_id, upload_directory)
-        status = await event.reply(f"Queued\n\nFile: {filename}\nSize: {format_bytes(size)}\nDirectory: {upload_directory}\nDestination: {destination}\nPosition: {position}")
-        job.status_message_id = status.id
-        await state.save(job)
-        try:
-            await queue.add(job)
-        except asyncio.QueueFull:
-            job.status = JobStatus.FAILED
-            job.error_message = "Upload queue became full before the job could be accepted"
+        # Serialize admission through the first awaited Telegram reply. Without
+        # this lock, concurrent album/file events can all observe the same
+        # qsize before any of them is actually added and each display position 1.
+        async with enqueue_lock:
+            key = f"{event.chat_id}:{event.message.id}"
+            if key in completed or key in queue.pending or key in queue.active:
+                await event.reply("This Telegram message was already processed.")
+                return
+            file = event.message.file
+            size = int(getattr(file, "size", 0) or 0)
+            original = getattr(file, "name", None)
+            media_type = event.message.media.__class__.__name__.lower()
+            timestamp = event.message.date.astimezone(timezone.utc)
+            filename = sanitize_filename(original or fallback_filename(event.message.id, media_type, timestamp, getattr(file, "mime_type", None)))
+            upload_directory = await directories.get_user_current_directory(sender_id)
+            upload_username = directories.get_allowed_username(sender_id)
+            job = UploadJob(job_key=key, chat_id=event.chat_id, message_id=event.message.id, sender_id=sender_id, filename=filename, file_size=size, upload_username=upload_username, upload_directory=upload_directory, media_group_id=str(event.message.grouped_id) if event.message.grouped_id else None)
+            if queue.queue.full():
+                await event.reply("Upload queue is full. Please retry later.")
+                return
+            # Create and persist the status message before exposing the job to a
+            # worker. Otherwise a fast worker can start with no message ID and all
+            # early progress edits are lost.
+            position = queue.queue.qsize() + 1
+            destination = directories.build_destination_directory(sender_id, upload_directory)
+            status = await event.reply(f"Queued\n\nFile: {filename}\nSize: {format_bytes(size)}\nDirectory: {upload_directory}\nDestination: {destination}\nPosition: {position}")
+            job.status_message_id = status.id
             await state.save(job)
             try:
-                await status.edit("Upload queue is full. Please retry later.")
-            except Exception:
-                await event.reply("Upload queue is full. Please retry later.")
+                await queue.add(job)
+            except asyncio.QueueFull:
+                job.status = JobStatus.FAILED
+                job.error_message = "Upload queue became full before the job could be accepted"
+                await state.save(job)
+                try:
+                    await status.edit("Upload queue is full. Please retry later.")
+                except Exception:
+                    await event.reply("Upload queue is full. Please retry later.")
