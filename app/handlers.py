@@ -111,6 +111,17 @@ def register_handlers(client: object, settings: Settings, queue: QueueManager, s
             return
         sender_id = event.sender_id or 0
         if not settings.is_authorized(sender_id, self_id):
+            # Never answer our own outgoing messages. This also prevents a
+            # reply loop if the Telegram account itself is not allowlisted.
+            if (
+                sender_id > 0
+                and sender_id != self_id
+                and not getattr(event, "out", False)
+                and not settings.telegram_id_discovery_only
+                and settings.allowed_user_ids
+            ):
+#                 owner_id = settings.allowed_user_ids[0]
+                await event.reply(f'DM admin @sgoutham11 to access the streaming platform.')
             return
         if event.raw_text.strip().startswith("."):
             await commands.handle(event)
