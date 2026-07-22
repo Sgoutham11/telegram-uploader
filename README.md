@@ -36,7 +36,7 @@ ALLOWED_USER_IDS=111111111,222222222
 ALLOWED_USER_NAME=GOUTHAM,GALAXY
 ```
 
-The lists map by position: `111111111 -> GOUTHAM` and `222222222 -> GALAXY`. They must have equal, non-zero lengths; IDs and names must be unique. The first ID is also treated as the owner/admin ID shown in access notices. Startup fails on an invalid mapping. Messages from other chats are silently ignored; unknown users in the watched group receive the access notice but their content is not processed. Obtain IDs from trusted tooling or Telegram logs; never give an untrusted bot sensitive forwarded content.
+The lists map by position: `111111111 -> GOUTHAM` and `222222222 -> GALAXY`. They must have equal, non-zero lengths; IDs and names must be unique. Startup fails on an invalid mapping. Messages from other chats are silently ignored; unknown users in the watched group are directed to `@sgoutham11`, but their content is not processed. Obtain IDs from trusted tooling or Telegram logs; never give an untrusted bot sensitive forwarded content.
 
 ### Discover Telegram IDs during setup
 
@@ -59,7 +59,7 @@ docker compose -f docker-compose.prod.yml logs -f telegram-uploader
 
 The log block reports the chat ID for `WATCH_CHAT_ID`, sender ID for `ALLOWED_USER_IDS`, sender display name, username, chat type, and message type. After collecting every trusted user's ID, configure the two ordered allowlist variables, set `DEBUG_TELEGRAM_IDS=false`, and restart. Debugging logs setup metadata and message text from every received Telegram message before filtering; keep it disabled outside this short setup window.
 
-Messages from users who are not listed in `ALLOWED_USER_IDS` are not processed. In the watched group, the service tells them to DM the owner ID, taken automatically from the first entry in `ALLOWED_USER_IDS`. The service never sends this notice in unrelated chats or while Telegram ID discovery-only mode is active.
+Messages from users who are not listed in `ALLOWED_USER_IDS` are not processed. In the watched group, the service tells them to DM `@sgoutham11`. The service never sends this notice in unrelated chats or while Telegram ID discovery-only mode is active.
 
 ## Configure rclone
 
@@ -193,7 +193,7 @@ Type `.status`, `.queue`, `.dir [path|default|reset]`, `.cancel`, `.cancel <mess
 
 ## Configuration reference
 
-`.env.example` is the authoritative full reference. `ALLOWED_USER_IDS` and `ALLOWED_USER_NAME` are ordered lists that define authorization and each user's top-level cloud directory; the first allowed ID is the owner/admin displayed in access notices. `DEBUG_TELEGRAM_IDS=false` is the production-safe default and should be enabled only while discovering initial setup identifiers. Important controls also include `RCLONE_BASE_PATH`, `DEFAULT_UPLOAD_DIRECTORY`, queue/concurrency limits, disk reserve and optional size ceiling, progress interval, rclone retry/checker/transfer parameters, collision policy (`rename`, `overwrite`, `skip`), local cleanup/failed retention, interrupted-job retry, rotating logs, and optional public links. `REMOTE_FOLDER_PATTERN` is deprecated, retained only for environment compatibility, and has no effect; date folders are disabled. `MAX_FILE_SIZE_GB=0` disables the application ceiling.
+`.env.example` is the authoritative full reference. `ALLOWED_USER_IDS` and `ALLOWED_USER_NAME` are ordered lists that define authorization and each user's top-level cloud directory. `DEBUG_TELEGRAM_IDS=false` is the production-safe default and should be enabled only while discovering initial setup identifiers. Important controls also include `RCLONE_BASE_PATH`, `DEFAULT_UPLOAD_DIRECTORY`, queue/concurrency limits, disk reserve and optional size ceiling, progress interval, rclone retry/checker/transfer parameters, collision policy (`rename`, `overwrite`, `skip`), local cleanup/failed retention, interrupted-job retry, rotating logs, and optional public links. `REMOTE_FOLDER_PATTERN` is deprecated, retained only for environment compatibility, and has no effect; date folders are disabled. `MAX_FILE_SIZE_GB=0` disables the application ceiling.
 
 Google Drive uploads use `RCLONE_DRIVE_CHUNK_SIZE=64Mi` by default. The observed peak on a 1 GB deployment remained far below the production container's 700 MiB hard limit, leaving room for this larger upload buffer. Larger chunks can improve resumable-upload throughput but consume that much memory per active transfer. Production Compose reserves 256 MiB and limits the service to 128 processes. Keep `MAX_CONCURRENT_JOBS=1`, `RCLONE_TRANSFERS=1`, and `RCLONE_CHECKERS=2` on a 1 GB instance. Google Drive does not support rclone's multi-thread single-file upload interface, so `RCLONE_TRANSFERS` only helps when separate files are uploading concurrently; it does not split one Drive file across parallel streams. `RCLONE_UPLOAD_TIMEOUT_MINUTES=180` stops a genuinely wedged cloud process; active progress is capped at 99.9% until rclone exits and remote size verification succeeds. When rclone retries, Telegram shows the attempt number, current-attempt progress, and the latest available rclone error instead of holding at the previous attempt's 99.9%. INFO-level rclone diagnostics are inspected for Drive/API failures, and `RCLONE_RETRIES_SLEEP_SECONDS=10` pauses between whole-file attempts.
 

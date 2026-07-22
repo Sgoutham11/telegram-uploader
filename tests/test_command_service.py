@@ -94,7 +94,7 @@ async def test_authorization_and_monitored_group_are_enforced(tmp_path):
     unauthorized = Event(".dir Movies", sender_id=999)
     unauthorized.chat_id = -100123
     await client.handler(unauthorized)
-    assert unauthorized.replies == ['DM admin "123" to access the streaming platform.']
+    assert unauthorized.replies == ["DM admin @sgoutham11 to access the streaming platform."]
 
     unrelated = Event(".dir Movies", sender_id=123)
     unrelated.chat_id = -100999
