@@ -94,13 +94,25 @@ async def test_authorization_and_monitored_group_are_enforced(tmp_path):
     unauthorized = Event(".dir Movies", sender_id=999)
     unauthorized.chat_id = -100123
     await client.handler(unauthorized)
-    assert unauthorized.replies == []
+    assert unauthorized.replies == ['DM admin "123" to access the streaming platform.']
 
     unrelated = Event(".dir Movies", sender_id=123)
     unrelated.chat_id = -100999
     await client.handler(unrelated)
     assert unrelated.replies == []
     assert await directories.get_user_current_directory(123) == "DOWNLOADS"
+
+
+async def test_unauthorized_notice_never_replies_to_self(tmp_path):
+    commands, directories = await service(tmp_path)
+    client = FakeClient()
+    config = commands.settings
+    register_handlers(client, config, commands.queue, commands.state, commands, directories, self_id=777)
+
+    own_message = Event("Hello", sender_id=777)
+    own_message.chat_id = -100123
+    await client.handler(own_message)
+    assert own_message.replies == []
 
 
 async def test_debug_ids_are_logged_before_chat_and_sender_filters(tmp_path, caplog):
